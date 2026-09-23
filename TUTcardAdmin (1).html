@@ -33,6 +33,12 @@
   if (!window.firebase) { console.error('Firebase SDK failed to load -- check your network.'); return; }
   var app = firebase.apps.length ? firebase.app() : firebase.initializeApp(firebaseConfig);
   var db = firebase.firestore();
+  // Some networks/antivirus (e.g. Kaspersky, some campus/corporate Wi-Fi and
+  // proxies) intercept HTTPS and break Firestore's default streaming
+  // connection, causing every request to silently time out. Auto-detecting
+  // long polling falls back to plain HTTP requests when that happens, which
+  // works almost everywhere. Must be set before any other Firestore call.
+  try { db.settings({ experimentalAutoDetectLongPolling: true, merge: true }); } catch (e) {}
 
   var originalGetItem = Storage.prototype.getItem;
   var originalSetItem = Storage.prototype.setItem;
@@ -96,9 +102,7 @@
       await batch.commit();
     } catch (e) {
       console.error('Firestore write failed:', e);
-      alert('Could not save to the cloud database. Check your internet connection and try again.
-
-' + (e && e.message ? e.message : e));
+      alert('Could not save to the cloud database. Check your internet connection and try again.\n\n' + (e && e.message ? e.message : e));
     }
   }
 
@@ -734,6 +738,33 @@
   };
 })();
 </script>
+
+<script>
+// Show the full ID/Passport number in the application Details tab so admin staff
+// can verify it against the uploaded document (instead of the masked version).
+(function() {
+  var _origOpenDetail = window.openDetail;
+  if (typeof _origOpenDetail !== 'function') return;
+
+  window.openDetail = function(idx) {
+    _origOpenDetail(idx);
+
+    var records = (typeof getRecords === 'function') ? getRecords() : [];
+    var record = records[idx];
+    if (!record) return;
+
+    var fullId = record.idNumber || '—';
+    var labels = document.querySelectorAll('#detailsGrid .detail-item, .detail-item');
+    labels.forEach(function(item) {
+      var lbl = item.querySelector('.lbl');
+      var val = item.querySelector('.val');
+      if (lbl && val && /ID\s*\/\s*PASSPORT/i.test(lbl.textContent)) {
+        val.textContent = fullId;
+      }
+    });
+  };
+})();
+</script>
   <!-- CLEAR DATA CONFIRM MODAL -->
   <div id="clearDataModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center;">
     <div style="background:#fff;border-radius:12px;padding:32px 28px;max-width:380px;width:90%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.3);">
@@ -843,7 +874,6 @@
     const staffName = ((record.firstName || '') + ' ' + (record.lastName || '')).trim();
     const staffNo   = record.studentNo || '—';
     const staffId   = record.idNumber  || '—';
-    const maskedId  = staffId.length > 6 ? staffId.substring(0,6) + '******' : staffId;
 
     container.innerHTML = `
       <div>
@@ -856,7 +886,7 @@
         <div style="background:#e8f0fb;border:1px solid #c8d8f4;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px;display:flex;flex-wrap:wrap;gap:14px;">
           <span><strong>Name on application:</strong> ${staffName || '—'}</span>
           <span><strong>Student/Staff No:</strong> ${staffNo}</span>
-          <span><strong>ID Number (masked):</strong> ${maskedId}</span>
+          <span><strong>ID Number:</strong> ${staffId}</span>
         </div>
 
         <p style="font-size:12px;color:var(--muted);margin-bottom:14px;">
@@ -1243,7 +1273,8 @@ window.doLogin = async function () {
   try {
     auth = await ensureAdminAuthDoc();
   } catch (e) {
-    errEl.innerHTML = '<i class="fas fa-wifi"></i> Could not reach the server. Check your internet connection and try again.';
+    console.error('Admin login Firestore error:', e);
+    errEl.innerHTML = '<i class="fas fa-wifi"></i> Could not reach the server (' + ((e && e.code) || (e && e.message) || 'unknown error') + '). Check your internet connection and try again.';
     errEl.style.display = '';
     hintEl.style.display = 'none';
     return;
@@ -1301,7 +1332,7 @@ window.verifyForgotPassword = async function () {
   }
   let auth;
   try { auth = await ensureAdminAuthDoc(); }
-  catch (e) { errEl.textContent = 'Could not reach the server. Check your connection.'; errEl.style.display = ''; return; }
+  catch (e) { console.error('Forgot-password Firestore error:', e); errEl.textContent = 'Could not reach the server (' + ((e && e.code) || (e && e.message) || 'unknown error') + ').'; errEl.style.display = ''; return; }
   const pinHash = await hashSecret(pin, auth.pinSalt);
   if (user === auth.username && pinHash === auth.pinHash) {
     document.getElementById('fpStep1').style.display = 'none';
@@ -1357,7 +1388,7 @@ window.verifyForgotUsername = async function () {
   }
   let auth;
   try { auth = await ensureAdminAuthDoc(); }
-  catch (e) { errEl.textContent = 'Could not reach the server. Check your connection.'; errEl.style.display = ''; return; }
+  catch (e) { console.error('Forgot-username Firestore error:', e); errEl.textContent = 'Could not reach the server (' + ((e && e.code) || (e && e.message) || 'unknown error') + ').'; errEl.style.display = ''; return; }
   const passHash = await hashSecret(pass, auth.passwordSalt);
   const pinHash  = await hashSecret(pin, auth.pinSalt);
   if (passHash === auth.passwordHash && pinHash === auth.pinHash) {
@@ -1453,3 +1484,18 @@ if (sessionStorage.getItem('adminUser')) startInactivityTimer();
 
 </body>
 </html>
+
+<!--
+  ╔══════════════════════════════════════════════════════════════╗
+  ║        TUT STUDENT CARD APPLICATION SYSTEM                  ║
+  ║        © 2026 MJ RAMANNA — ALL RIGHTS RESERVED              ║
+  ║        Tshwane University of Technology — FoICT              ║
+  ║                                                              ║
+  ║  PROTECTED INTELLECTUAL PROPERTY                            ║
+  ║  Unauthorised copying, modification, distribution or        ║
+  ║  reverse-engineering of this software is strictly           ║
+  ║  prohibited and may result in legal action.                  ║
+  ║                                                              ║
+  ║  Student No: 223037682 | Research Day 2026                  ║
+  ╚══════════════════════════════════════════════════════════════╝
+-->
