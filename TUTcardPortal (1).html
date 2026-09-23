@@ -33,6 +33,12 @@
   if (!window.firebase) { console.error('Firebase SDK failed to load -- check your network.'); return; }
   var app = firebase.apps.length ? firebase.app() : firebase.initializeApp(firebaseConfig);
   var db = firebase.firestore();
+  // Some networks/antivirus (e.g. Kaspersky, some campus/corporate Wi-Fi and
+  // proxies) intercept HTTPS and break Firestore's default streaming
+  // connection, causing every request to silently time out. Auto-detecting
+  // long polling falls back to plain HTTP requests when that happens, which
+  // works almost everywhere. Must be set before any other Firestore call.
+  try { db.settings({ experimentalAutoDetectLongPolling: true, merge: true }); } catch (e) {}
 
   var originalGetItem = Storage.prototype.getItem;
   var originalSetItem = Storage.prototype.setItem;
@@ -96,9 +102,7 @@
       await batch.commit();
     } catch (e) {
       console.error('Firestore write failed:', e);
-      alert('Could not save to the cloud database. Check your internet connection and try again.
-
-' + (e && e.message ? e.message : e));
+      alert('Could not save to the cloud database. Check your internet connection and try again.\n\n' + (e && e.message ? e.message : e));
     }
   }
 
@@ -383,7 +387,12 @@ body{padding-bottom:env(safe-area-inset-bottom,0px)}
     <div class="header-title">TUT Card Management System</div>
     <div class="header-sub">Tshwane University of Technology — Card Registration Portal</div>
   </div>
-  <div class="header-actions" style="display:flex;align-items:center;gap:10px;">
+  <div class="header-actions" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+    <div id="headerAuthBar" style="font-size:.82rem;color:#fff;display:flex;align-items:center;gap:8px;"></div>
+    <button onclick="goHome()"
+      style="background:rgba(255,255,255,0.15);color:#fff;border:1.5px solid rgba(255,255,255,0.5);border-radius:6px;padding:7px 16px;font-size:.85rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px;">
+      <i class="fa-solid fa-house"></i> Home
+    </button>
     <button onclick="document.getElementById('refreshModal').style.display='flex';"
       style="background:rgba(255,255,255,0.15);color:#fff;border:1.5px solid rgba(255,255,255,0.5);border-radius:6px;padding:7px 16px;font-size:.85rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px;">
       <i class="fa-solid fa-rotate-right"></i> Refresh
@@ -596,8 +605,13 @@ body{padding-bottom:env(safe-area-inset-bottom,0px)}
     </div>
     <div class="form-group" id="resNameGroup" style="display:none">
       <label for="fResName">Residence Name</label>
-      <input type="text" id="fResName" placeholder="Name of residence">
+      <input type="text" id="fResName" placeholder="e.g. SOSH1">
       <span class="field-error" id="errResName"></span>
+    </div>
+    <div class="form-group" id="buildingGroup" style="display:none">
+      <label for="fBuilding">Building / Room</label>
+      <input type="text" id="fBuilding" placeholder="e.g. M4">
+      <span class="field-error" id="errBuilding"></span>
     </div>
     <div class="form-group" id="busGroup">
       <div class="toggle-wrap">
@@ -927,7 +941,7 @@ function startNew() {
   state.resName = '';
   if (state.photoURL) { URL.revokeObjectURL(state.photoURL); state.photoURL = null; }
   // Reset form fields
-  ['fTitle','fFirst','fLast','fStudentNo','fIdNumber','fCampus','fFaculty','fGender','fAccom','fResName'].forEach(id => {
+  ['fTitle','fFirst','fLast','fStudentNo','fIdNumber','fCampus','fFaculty','fGender','fAccom','fResName','fBuilding'].forEach(id => {
     const el = document.getElementById(id); if (el) el.value = '';
   });
   const busEl = document.getElementById('fBus'); if (busEl) busEl.checked = false;
@@ -957,7 +971,7 @@ function doReset() {
   }
 
   // Reset form fields
-  ['fTitle','fFirst','fLast','fStudentNo','fIdNumber','fEmail','fPhone','fCampus','fFaculty','fGender','fAccom','fResName'].forEach(function(id) {
+  ['fTitle','fFirst','fLast','fStudentNo','fIdNumber','fEmail','fPhone','fCampus','fFaculty','fGender','fAccom','fResName','fBuilding'].forEach(function(id) {
     const el = document.getElementById(id); if (el) el.value = '';
   });
   const busEl = document.getElementById('fBus'); if (busEl) busEl.checked = false;
@@ -983,6 +997,8 @@ function doReset() {
   // Hide groups that should be hidden
   const resNameGroup = document.getElementById('resNameGroup');
   if (resNameGroup) resNameGroup.style.display = 'none';
+  const buildingGroup = document.getElementById('buildingGroup');
+  if (buildingGroup) buildingGroup.style.display = 'none';
   const uiRes = document.getElementById('uiRes');
   if (uiRes) uiRes.style.display = 'none';
 }
@@ -1054,6 +1070,8 @@ function goStep3() {
   if (uiRes && accomEl) uiRes.style.display = (!isStaff() && accomEl.value === 'On Campus') ? '' : 'none';
   const resNameGroupEl = document.getElementById('resNameGroup');
   if (resNameGroupEl) resNameGroupEl.style.display = (!isStaff() && accomEl && accomEl.value === 'On Campus') ? '' : 'none';
+  const buildingGroupEl = document.getElementById('buildingGroup');
+  if (buildingGroupEl) buildingGroupEl.style.display = (!isStaff() && accomEl && accomEl.value === 'On Campus') ? '' : 'none';
 
   showPage('pageStep3');
   updateStepBar(2);
@@ -1203,6 +1221,7 @@ function validateStep2() {
     const accomValEl = document.getElementById('fAccom');
     if (accomValEl && accomValEl.value === 'On Campus') {
       req.push(['fResName', 'errResName', 'Residence Name']);
+      req.push(['fBuilding', 'errBuilding', 'Building / Room']);
     }
   }
   req.forEach(([fid, eid, label]) => {
@@ -1327,11 +1346,17 @@ function toggleAccom() {
   const resNameGroup = document.getElementById('resNameGroup');
   const fResName = document.getElementById('fResName');
   const errResName = document.getElementById('errResName');
+  const buildingGroup = document.getElementById('buildingGroup');
+  const fBuilding = document.getElementById('fBuilding');
+  const errBuilding = document.getElementById('errBuilding');
   const isOnCampus = !isStaff() && accomEl && accomEl.value === 'On Campus';
   if (uiRes) uiRes.style.display = isOnCampus ? '' : 'none';
   if (resNameGroup) resNameGroup.style.display = isOnCampus ? '' : 'none';
+  if (buildingGroup) buildingGroup.style.display = isOnCampus ? '' : 'none';
   if (!isOnCampus && fResName) fResName.value = '';
   if (!isOnCampus && errResName) errResName.textContent = '';
+  if (!isOnCampus && fBuilding) fBuilding.value = '';
+  if (!isOnCampus && errBuilding) errBuilding.textContent = '';
 }
 
 // ============================================================
@@ -1583,12 +1608,14 @@ function buildCardPreview() {
   set('cardCornerNum', num);
   // Role label
   set('cardRole', isStaff() ? 'STAFF' : (isRes ? 'TUT RES - 2026' : 'STUDENT'));
-  // Residence block — show name from uploaded proof of res filename
+  // Residence block — combines Residence Name + Building/Room, e.g. "SOSH1 M4"
   const resBlockEl = document.getElementById('cardBlock');
   if (resBlockEl) {
-    const resNameVal = document.getElementById('fResName') ? document.getElementById('fResName').value.trim() : '';
-    if (isRes && resNameVal) {
-      resBlockEl.textContent = resNameVal.toUpperCase();
+    const resNameVal   = document.getElementById('fResName')  ? document.getElementById('fResName').value.trim()  : '';
+    const buildingVal  = document.getElementById('fBuilding') ? document.getElementById('fBuilding').value.trim() : '';
+    const resCombined  = [resNameVal, buildingVal].filter(Boolean).join(' ');
+    if (isRes && resCombined) {
+      resBlockEl.textContent = resCombined.toUpperCase();
       resBlockEl.style.display = '';
     } else {
       resBlockEl.style.display = 'none';
@@ -1688,6 +1715,10 @@ function buildSummary() {
     const accom = g('fAccom');
     rows.splice(6, 0, ['Faculty', g('fFaculty')]);
     rows.push(['Accommodation', accom]);
+    if (accom === 'On Campus') {
+      rows.push(['Residence Name', g('fResName')]);
+      rows.push(['Building / Room', g('fBuilding')]);
+    }
     rows.push(['Bus Transport', busEl && busEl.checked ? 'Yes' : 'No']);
     rows.push(['Proof of Reg',  state.uploads.reg ? state.uploads.reg.name : '—']);
     rows.push(['Proof of Res',  state.uploads.res ? state.uploads.res.name : (accom === 'On Campus' ? '—' : 'N/A')]);
@@ -1813,7 +1844,9 @@ async function submitApplication() {
     gender:         escapeHtml(g('fGender')),
     accommodation:  isStaff() ? '' : escapeHtml(g('fAccom')),
     busTransport:   isStaff() ? 'No' : (busEl && busEl.checked ? 'Yes' : 'No'),
-    residenceBlock: (!isStaff() && g('fAccom') === 'On Campus') ? escapeHtml(g('fResName')) : '',
+    residenceBlock: (!isStaff() && g('fAccom') === 'On Campus') ? escapeHtml([g('fResName'), g('fBuilding')].filter(Boolean).join(' ')) : '',
+    residenceName:  (!isStaff() && g('fAccom') === 'On Campus') ? escapeHtml(g('fResName'))  : '',
+    building:       (!isStaff() && g('fAccom') === 'On Campus') ? escapeHtml(g('fBuilding')) : '',
     email:          escapeHtml(g('fEmail')),
     phone:          escapeHtml(g('fPhone')),
     timestamp:      new Date().toISOString(),
@@ -1943,6 +1976,22 @@ function showTracker() {
   var tracker = document.getElementById('statusTrackerCard');
   if (tracker) tracker.style.display = 'block';
   setTimeout(function(){ var inp = document.getElementById('trackRefInput'); if(inp) inp.focus(); }, 100);
+}
+
+// Universal "go back home" — works from any page/step
+function goHome() {
+  ['pageStep1','pageStep2','pageStep3','pageStep4','pageStep5','statusTrackerCard','myAppsCard'].forEach(function(id){
+    var el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+  var result = document.getElementById('trackResult');
+  if (result) result.innerHTML = '';
+  var inp = document.getElementById('trackRefInput');
+  if (inp) inp.value = '';
+  var bar = document.getElementById('stepBar');
+  if (bar) bar.style.display = 'none';
+  var landing = document.getElementById('pageLanding');
+  if (landing) landing.style.display = '';
 }
 
 function goBackToLanding() {
@@ -2129,6 +2178,7 @@ window.addEventListener('storage', function(e) {
   window.studentLogout = async function () {
     var a = getAuth();
     if (a) await a.signOut();
+    if (typeof window.goHome === 'function') window.goHome();
   };
 
   function updateAuthUI(user) {
@@ -2138,16 +2188,23 @@ window.addEventListener('storage', function(e) {
     var authRow = document.getElementById('authBtnRow');
     var appRow = document.getElementById('appBtnRow');
     var hint = document.getElementById('authHintText');
-    if (!bar) return;
+    var headerBar = document.getElementById('headerAuthBar');
     if (user) {
       var label = (user.displayName || user.email || 'Student').replace(/</g, '&lt;');
-      bar.innerHTML = '<span style="color:#155724;"><i class="fa-solid fa-circle-check"></i> Signed in as <strong>' + label +
-        '</strong></span> &nbsp; <button onclick="studentLogout()" style="background:none;border:1px solid #ccc;border-radius:6px;padding:4px 10px;font-size:.78rem;cursor:pointer;color:#444;">Log out</button>';
+      if (bar) {
+        bar.innerHTML = '<span style="color:#155724;"><i class="fa-solid fa-circle-check"></i> Signed in as <strong>' + label +
+          '</strong></span> &nbsp; <button onclick="studentLogout()" style="background:none;border:1px solid #ccc;border-radius:6px;padding:4px 10px;font-size:.78rem;cursor:pointer;color:#444;">Log out</button>';
+      }
+      if (headerBar) {
+        headerBar.innerHTML = '<span><i class="fa-solid fa-circle-user"></i> ' + label +
+          '</span><button onclick="studentLogout()" style="background:rgba(255,255,255,0.15);color:#fff;border:1.5px solid rgba(255,255,255,0.5);border-radius:6px;padding:6px 14px;font-size:.82rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px;"><i class="fa-solid fa-right-from-bracket"></i> Log out</button>';
+      }
       if (authRow) authRow.style.display = 'none';
       if (appRow) appRow.style.display = 'flex';
       if (hint) hint.style.display = 'none';
     } else {
-      bar.innerHTML = '<span style="color:#6b7280;"><i class="fa-solid fa-user"></i> Not signed in</span>';
+      if (bar) bar.innerHTML = '<span style="color:#6b7280;"><i class="fa-solid fa-user"></i> Not signed in</span>';
+      if (headerBar) headerBar.innerHTML = '';
       if (authRow) authRow.style.display = 'flex';
       if (appRow) appRow.style.display = 'none';
       if (hint) hint.style.display = '';
